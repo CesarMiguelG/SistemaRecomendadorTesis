@@ -1,38 +1,47 @@
-# 🏡 Sistema Recomendador para la Mitigación del Rezago Habitacional en México (2015-2025)
+# 🏡 Sistema Recomendador para la Mitigación del Rezago Habitacional en México (2015-2026)
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
-![scikit-learn](https://img.shields.io/badge/scikit--learn-Machine%20Learning-orange.svg)
+![Playwright](https://img.shields.io/badge/Playwright-Web%20Scraping-green.svg)
+![SEDATU/SNIIV](https://img.shields.io/badge/API-SEDATU%20%7C%20SNIIV-red.svg)
 ![Pandas](https://img.shields.io/badge/Pandas-Data%20Analysis-lightgrey.svg)
-![LaTeX](https://img.shields.io/badge/LaTeX-Academic%20Writing-green.svg)
 ![Status](https://img.shields.io/badge/Status-En%20Desarrollo-yellow.svg)
 
 ## 📌 Descripción del Proyecto
-El mercado habitacional en México enfrenta un "Trilema" sistémico: precios al alza, elitización de la oferta y un rezago social persistente. Este proyecto de **Maestría en Ciencia de Datos** busca resolver la desconexión entre la construcción de vivienda y la demanda efectiva mediante **Analítica Prescriptiva**.
+Este proyecto de **Maestría en Ciencia de Datos** aborda la desconexión crítica entre la oferta inmobiliaria privada y la demanda social efectiva en México. Mediante un enfoque de **Analítica Prescriptiva**, el sistema identifica brechas de asequibilidad y sugiere zonas óptimas para el desarrollo habitacional.
 
-El objetivo principal es construir un **Sistema Recomendador Multicriterio** que consuma de manera automatizada grandes volúmenes de datos abiertos de las APIs del Gobierno Federal (SEDATU/SNIIV) para sugerir zonas geográficas óptimas y segmentos de vivienda prioritarios, apoyando la toma de decisiones estratégicas tanto para desarrolladores privados como para la asignación de subsidios públicos.
+La innovación técnica reside en un **Motor Híbrido de Adquisición de Datos** que cruza el inventario institucional del Gobierno Federal con la dinámica de precios en tiempo real del mercado abierto capturada vía scraping.
 
-## ⚙️ Arquitectura y Pipeline de Datos
-El proyecto está estructurado en las siguientes fases técnicas:
-1. **ETL (Extracción, Transformación y Carga):** Conexión automatizada a las APIs RESTful del Cubo de Financiamientos del SNIIV (INFONAVIT, FOVISSSTE, CNBV).
-2. **Feature Engineering:** Cálculo espacial de la "Brecha de Asequibilidad" cruzando el Ticket Promedio hipotecario contra los rangos salariales reales y los Perímetros de Contención Urbana (PCU).
-3. **Machine Learning:** Implementación de un algoritmo de **Filtrado Basado en Contenido (Content-Based Filtering)** utilizando métricas de similitud vectorial para emitir recomendaciones territoriales.
+---
+
+## ⚙️ Arquitectura y Pipeline de Datos (Nivel 9)
+El proyecto implementa un pipeline de datos robusto capaz de gestionar y procesar +200,000 registros:
+
+1.  **Extracción de Demanda (CuboAPI SNIIV):** Orquestador dinámico que consume 10 endpoints oficiales (INFONAVIT, FOVISSSTE, CONAVI, INSUS, etc.). Implementa lógica de *Chunking temporal* y manejo de *snapshots* de inventario.
+2.  **Extracción de Oferta (Web Scraping):** Motor de alto rendimiento desarrollado con **Playwright**, optimizado para los 32 estados de la república con:
+    * Deduplicación por *hashing* de URLs en memoria RAM.
+    * Sistema de reanudación automática (*Checkpointing*) basado en archivos físicos.
+    * Radar dinámico para detección de fin de inventario.
+3.  **Feature Engineering:** Modelado avanzado basado en los **Perímetros de Contención Urbana (PCU)**, niveles salariales en UMA y superficies de construcción.
+4.  **Machine Learning:** Algoritmo de similitud vectorial (Content-Based Filtering) para detectar el "Market Fit" entre el poder adquisitivo y la oferta disponible.
+
+---
 
 ## 📂 Estructura del Repositorio
 ```text
 SistemaRecomendadorTesis/
 │
-├── protocolo/               # Documento de protocolo de tesis escrito en LaTeX
-│   ├── protocolo_tesis.tex  # Código fuente del documento
-│   └── referencias.bib      # Base de datos bibliográfica (Formato APA)
+├── docs/                    # Documentación técnica y diccionarios de datos
+│   ├── REPORTE_TECNICO_SNIIV.md     # Metodología de la CuboAPI
+│   └── REPORTE_TECNICO_SCRAPING.md  # Metodología del Scraper Playwright
 │
-├── src/                     # Código fuente en Python
-│   ├── data_extraction.py   # Scripts de conexión a las APIs del SNIIV
-│   ├── data_cleaning.py     # Limpieza y transformación de JSON a DataFrames
-│   └── recommender.py       # Algoritmo de recomendación con scikit-learn
+├── src/                     # Código fuente (Python)
+│   ├── data_extraction.py   # Orquestador Maestro de APIs SEDATU
+│   ├── scraper_engine.py    # Motor de Scraping (Nivel 8.3)
+│   └── data_cleaning.py     # Limpieza y homologación (EDA)
 │
-├── notebooks/               # Jupyter Notebooks para EDA (Análisis Exploratorio)
+├── data/                    # Almacenamiento local (Ignorado en Git)
+│   ├── raw/
+│   │   ├── sedatu/          # 10 Datasets nacionales oficiales consolidadores
+│   │   └── estados/         # Oferta privada de los 32 estados (.csv)
 │
-├── data/                    # (Ignorado en git) Datasets crudos y procesados
-│
-├── .gitignore               # Reglas de exclusión para entornos virtuales y datos pesados
-└── README.md                # Este archivo
+└── notebooks/               # Jupyter Notebooks para análisis exploratorio
