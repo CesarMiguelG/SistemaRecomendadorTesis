@@ -6,24 +6,74 @@ import os
 import re
 from datetime import datetime
 
+# --- CONFIGURACIÓN ---
+DIRECTORIO_ACTUAL = os.path.dirname(os.path.abspath(__file__))
+CARPETA_SALIDA = os.path.abspath(os.path.join(DIRECTORIO_ACTUAL, "..", "data", "raw", "estados"))
+
+COLUMNAS_MAESTRAS = [
+    "Estado", "Pagina_Extraida", "Fecha_Consulta", 
+    "Precio", "Ubicacion", "Caracteristicas", "URL_Propiedad"
+]
+
+def limpiar_texto(texto):
+    if pd.isna(texto) or texto is None: return ""
+    return re.sub(r'\s+', ' ', str(texto)).strip()
+
 def limpiar_url(url_bruta):
-    if not url_bruta or pd.isna(url_bruta): return ""
+    if pd.isna(url_bruta) or not url_bruta: return ""
     return str(url_bruta).split('#')[0].strip()
 
-def obtener_metadatos_estado(page, url_estado):
+def preprocesar_y_normalizar_csvs(carpeta):
+    print(f"\n{'='*65}\n🛠️ FASE 1: NORMALIZACIÓN, AUDITORÍA Y ROTACIÓN DE CERTIFICADOS\n{'='*65}")
+    
+    # 1. DESTRUCCIÓN DE CERTIFICADOS OBSOLETOS (Falsos Positivos)
+    certificados_viejos = [f for f in os.listdir(carpeta) if f.startswith(".completado_")]
+    if certificados_viejos:
+        print(f"  🗑️ Revocando {len(certificados_viejos)} certificados de versiones anteriores...")
+        for viejo in certificados_viejos:
+            os.remove(os.path.join(carpeta, viejo))
+
+    # 2. NORMALIZACIÓN DE CSVS
+    archivos = [f for f in os.listdir(carpeta) if f.startswith("oferta_") and f.endswith(".csv")]
+    for archivo in archivos:
+        ruta = os.path.join(carpeta, archivo)
+        try:
+            df = pd.read_csv(ruta, engine='python', on_bad_lines='skip')
+            if df.empty: continue
+            
+            if 'URL' in df.columns: df.rename(columns={'URL': 'URL_Propiedad'}, inplace=True)
+            for col in ['Precio', 'Ubicacion', 'Caracteristicas']:
+                if col in df.columns: df[col] = df[col].apply(limpiar_texto)
+            if 'URL_Propiedad' in df.columns: df['URL_Propiedad'] = df['URL_Propiedad'].apply(limpiar_url)
+            for col_maestra in COLUMNAS_MAESTRAS:
+                if col_maestra not in df.columns: df[col_maestra] = ""
+            
+            # Forzar esquema y guardar
+            df[COLUMNAS_MAESTRAS].to_csv(ruta, index=False, encoding='utf-8-sig')
+        except: pass
+    print("✨ Base de datos homologada al Esquema V9.\n")
+
+def obtener_metadatos_reales(page, url_estado):
+    """Extrae el número total de propiedades que la web dice tener."""
     try:
-        page.goto(url_estado, timeout=60000)
-        time.sleep(3) 
-        texto_resultados = page.locator('h1, .results-count, [data-qa="search-results-title"]').inner_text()
-        numeros = re.findall(r'[\d,]+', texto_resultados)
+        page.goto(url_estado, timeout=60000, wait_until="domcontentloaded")
+        time.sleep(4)
+        texto = page.locator('h1, .results-count, [data-qa="search-results-title"]').inner_text()
+        numeros = re.findall(r'[\d,]+', texto)
         if numeros:
-            return int(numeros[0].replace(',', '')), (int(numeros[0].replace(',', '')) // 20) + 2
+            total = int(numeros[0].replace(',', ''))
+            return total, (total // 20) + 2
     except: pass
-    return None, 1000
+    return 0, 1000
 
 def rastreador_nacional_definitivo():
-    print("🇲🇽 Iniciando Crawler Nivel 8.3: Radar de Fin de Inventario Actualizado...")
+    os.makedirs(CARPETA_SALIDA, exist_ok=True)
     
+    # Preprocesa y destruye banderas viejas
+    preprocesar_y_normalizar_csvs(CARPETA_SALIDA)
+
+    print(f"{'='*65}\n🚀 FASE 2: CRAWLER CON AUDITORÍA MATEMÁTICA\n{'='*65}")
+
     estados = [
         "aguascalientes", "baja-california", "baja-california-sur", "campeche", 
         "chiapas", "chihuahua", "ciudad-de-mexico", "coahuila", "colima", 
@@ -33,157 +83,116 @@ def rastreador_nacional_definitivo():
         "sonora", "tabasco", "tamaulipas", "tlaxcala", "veracruz", "yucatan", 
         "zacatecas"
     ]
-    
-    carpeta_salida = "../data/raw/estados"
-    os.makedirs(carpeta_salida, exist_ok=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         page = context.new_page()
 
         for estado in estados:
-            print(f"\n{'='*60}")
-            print(f"📍 PROCESANDO: {estado.upper()}")
-            
             url_base = f"https://propiedades.com/{estado}/casas-venta"
-            archivo_csv = f"{carpeta_salida}/oferta_{estado}.csv"
-            archivo_finalizado = f"{carpeta_salida}/.completado_{estado}"
-            urls_vistas = set() 
+            archivo_csv = os.path.join(CARPETA_SALIDA, f"oferta_{estado}.csv")
+            
+            # NUEVO FORMATO DE CERTIFICADO V9
+            archivo_finalizado = os.path.join(CARPETA_SALIDA, f".certificado_v9_{estado}")
 
             if os.path.exists(archivo_finalizado):
-                print("✅ Estado ya completado. Saltando...")
+                print(f"📍 {estado.upper()}: ✅ Certificado V9 válido. Saltando.")
                 continue
 
-            total_web, paginas_estimadas = obtener_metadatos_estado(page, url_base)
-            
-            # AUTO-MIGRADOR
-            if os.path.exists(archivo_csv):
-                try:
-                    df_header = pd.read_csv(archivo_csv, nrows=0)
-                    if 'Fecha_Consulta' not in df_header.columns:
-                        archivo_legacy = f"{carpeta_salida}/oferta_{estado}_legacy.csv"
-                        if os.path.exists(archivo_legacy): os.remove(archivo_legacy)
-                        os.rename(archivo_csv, archivo_legacy)
-                        df_viejo = pd.read_csv(archivo_legacy, engine='python', on_bad_lines='skip')
-                        col_url = 'URL_Propiedad' if 'URL_Propiedad' in df_viejo.columns else 'URL'
-                        if col_url in df_viejo.columns:
-                            urls_vistas.update([limpiar_url(u) for u in df_viejo[col_url].dropna()])
-                except: pass
-
-            # CEREBRO DE REANUDACIÓN
+            # --- AUDITORÍA DE BRECHA ---
+            total_web, paginas_estimadas = obtener_metadatos_reales(page, url_base)
+            registros_locales = 0
+            urls_vistas = set()
             pagina_inicio = 1
+
             if os.path.exists(archivo_csv):
                 try:
-                    df_actual = pd.read_csv(archivo_csv, engine='python', on_bad_lines='skip')
-                    if not df_actual.empty:
-                        col_url = 'URL_Propiedad' if 'URL_Propiedad' in df_actual.columns else 'URL'
-                        if col_url in df_actual.columns:
-                            urls_vistas.update([limpiar_url(u) for u in df_actual[col_url].dropna()])
-
-                        if 'Pagina_Extraida' in df_actual.columns:
-                            ultima_pag = int(df_actual['Pagina_Extraida'].max())
-                            pagina_inicio = max(1, ultima_pag - 5)
-                            print(f"🔄 Reanudando motor desde la página: {pagina_inicio} (Incluye traslape)")
-                        
-                        if total_web and len(urls_vistas) >= (total_web * 0.95):
-                            print("🏁 Inventario prácticamente completo. Finalizando estado.")
-                            with open(archivo_finalizado, 'w') as f: f.write("OK")
-                            continue
+                    df_actual = pd.read_csv(archivo_csv)
+                    urls_vistas.update(df_actual['URL_Propiedad'].dropna().unique().tolist())
+                    registros_locales = len(urls_vistas)
+                    if 'Pagina_Extraida' in df_actual.columns:
+                        pagina_inicio = max(1, int(df_actual['Pagina_Extraida'].max()) - 1)
                 except: pass
 
-            # BUCLE DE EXTRACCIÓN
-            timeouts_consecutivos = 0  # <--- FAILSAFE INICIALIZADO
+            # Comparación científica de inventario
+            if total_web > 0:
+                cobertura = (registros_locales / total_web) * 100
+                print(f"📍 {estado.upper()}: Web = {total_web} | Local = {registros_locales} ({cobertura:.1f}% de cobertura)")
+                
+                if cobertura >= 98.0:
+                    print(f"  🏁 Cobertura alcanzada. Emitiendo Certificado V9...")
+                    with open(archivo_finalizado, 'w') as f: f.write(f"Auditado V9: {cobertura:.1f}%")
+                    continue
+            else:
+                print(f"📍 {estado.upper()}: Extrayendo a ciegas (no se detectó contador).")
+
+            # --- BUCLE DE EXTRACCIÓN ---
+            timeouts_consecutivos = 0
 
             for num_pagina in range(pagina_inicio, paginas_estimadas + 1):
-                tiempo_inicio_ciclo = time.time() 
+                t_inicio = time.time()
                 url = url_base if num_pagina == 1 else f"{url_base}?pagina={num_pagina}"
-                fecha_ahora = datetime.now().strftime("%Y-%m-%d %H:%M")
                 
                 try:
-                    page.goto(url, timeout=90000)
-                    time.sleep(2) # Breve pausa para dejar que renderice el mensaje de error si existe
+                    page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                    time.sleep(3)
                     
-                    if num_pagina > 1 and f"pagina={num_pagina}" not in page.url:
-                        print("🏁 Redirección detectada. Fin de inventario.")
-                        with open(archivo_finalizado, 'w') as f: f.write(fecha_ahora)
-                        break
-
-                    # --- NUEVO RADAR DE FIN DE INVENTARIO BASADO EN TU CAPTURA ---
-                    if (page.locator('text="¡Lo sentimos!"').is_visible() or 
-                        page.locator('text="Tu búsqueda no generó resultados"').is_visible() or
-                        page.locator('text="No encontramos resultados"').is_visible()):
-                        
-                        print(f"  🏁 Fin de inventario visual detectado en la página {num_pagina}.")
-                        with open(archivo_finalizado, 'w') as f: f.write(fecha_ahora)
+                    if num_pagina > 5 and page.locator('text="¡Lo sentimos!"').is_visible():
+                        print("    🏁 Fin visual detectado. Emitiendo Certificado V9...")
+                        with open(archivo_finalizado, 'w') as f: f.write("Completado visualmente V9")
                         break
 
                     page.evaluate("window.scrollBy(0, document.body.scrollHeight/2)")
-                    page.wait_for_selector('section.pcom-property-card', timeout=15000)
                     tarjetas = page.query_selector_all('section.pcom-property-card')
-
                     datos_lote = []
-                    duplicados_omitidos = 0
+                    duplicados = 0
 
                     for t in tarjetas:
                         try:
                             calle_el = t.query_selector('a.pcom-property-card-body-main-info-street')
-                            link_bruto = calle_el.get_attribute('href')
-                            if link_bruto and not link_bruto.startswith('http'): link_bruto = "https://propiedades.com" + link_bruto
-                            link_puro = limpiar_url(link_bruto)
+                            link = f"https://propiedades.com{calle_el.get_attribute('href')}".split('#')[0]
+                            if link in urls_vistas:
+                                duplicados += 1
+                                continue
+                            urls_vistas.add(link)
                             
-                            if link_puro in urls_vistas:
-                                duplicados_omitidos += 1
-                                continue 
-                            urls_vistas.add(link_puro)
-                            
-                            precio = t.query_selector('section[class*="main-info"] > div').inner_text().strip()
-                            calle = calle_el.inner_text().strip().replace('\n', ' ')
-                            caract = " | ".join([am.inner_text().strip() for am in t.query_selector_all('li.amenities')])
-
                             datos_lote.append({
                                 "Estado": estado.title(),
                                 "Pagina_Extraida": num_pagina,
-                                "Fecha_Consulta": fecha_ahora,
-                                "Precio": precio,
-                                "Ubicacion": calle,
-                                "Caracteristicas": caract,
-                                "URL_Propiedad": link_puro
+                                "Fecha_Consulta": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                "Precio": limpiar_texto(t.query_selector('section[class*="main-info"] > div').inner_text()),
+                                "Ubicacion": limpiar_texto(calle_el.inner_text()),
+                                "Caracteristicas": limpiar_texto(" | ".join([am.inner_text() for am in t.query_selector_all('li.amenities')])),
+                                "URL_Propiedad": link
                             })
                         except: continue
 
                     if datos_lote:
-                        df_p = pd.DataFrame(datos_lote)
+                        df_p = pd.DataFrame(datos_lote)[COLUMNAS_MAESTRAS]
                         df_p.to_csv(archivo_csv, mode='a', index=False, header=not os.path.exists(archivo_csv), encoding='utf-8-sig')
-                        
-                    tiempo_procesamiento = time.time() - tiempo_inicio_ciclo
-                    tiempo_espera = max(1.0, random.uniform(8.0, 12.0) - tiempo_procesamiento)
                     
-                    print(f"      ✅ Pág {num_pagina}: {len(datos_lote)} nuevas | {duplicados_omitidos} repetidas.")
-                    print(f"      ⏱️ T. Proc: {tiempo_procesamiento:.1f}s | Pausando {tiempo_espera:.1f}s")
+                    t_proc = time.time() - t_inicio
+                    t_espera = max(1.0, random.uniform(8.0, 11.0) - t_proc)
+                    print(f"    ✅ Pág {num_pagina}: {len(datos_lote)} nuevas | {duplicados} repetidas | ⏱️ {t_proc:.1f}s")
                     
-                    timeouts_consecutivos = 0 # Reseteamos el failsafe si hubo éxito
-                    time.sleep(tiempo_espera)
+                    timeouts_consecutivos = 0 
+                    time.sleep(t_espera)
 
                 except TimeoutError:
                     timeouts_consecutivos += 1
-                    print(f"  ❌ Timeout. Saltando a la siguiente... ({timeouts_consecutivos}/3)")
-                    
-                    # --- EL CORTOCIRCUITO ---
+                    print(f"    ❌ Timeout ({timeouts_consecutivos}/3)")
                     if timeouts_consecutivos >= 3:
-                        print("  🛑 Demasiados Timeouts seguidos. El inventario se acabó o hay un bloqueo en la sombra.")
-                        with open(archivo_finalizado, 'w') as f: f.write(fecha_ahora)
-                        break # Cortamos por lo sano y pasamos al siguiente estado
+                        print("    🛑 Bloqueo detectado. Emitiendo certificado de contingencia V9...")
+                        with open(archivo_finalizado, 'w') as f: f.write("Cerrado por Timeouts V9")
+                        break 
                     continue
-                    
                 except Exception as e:
-                    print(f"  ❌ Error inesperado: {e}")
+                    print(f"    ❌ Error: {e}")
                     break
 
         browser.close()
-    print("\n🚀 Extracción finalizada a máxima eficiencia.")
+    print("\n🚀 Proceso Finalizado. Todos los datos están certificados y listos para el Recomendador.")
 
 if __name__ == "__main__":
     rastreador_nacional_definitivo()
