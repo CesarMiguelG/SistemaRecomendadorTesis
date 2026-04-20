@@ -1,122 +1,139 @@
 import pandas as pd
 import time
 import os
+import sys
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
-from tqdm import tqdm # Barra de progreso visual
+from tqdm import tqdm
 
 # --- CONFIGURACIÓN DE RUTAS ---
-DIRECTORIO_ACTUAL = os.path.dirname(os.path.abspath(__file__))
-ARCHIVO_ENTRADA = os.path.abspath(os.path.join(DIRECTORIO_ACTUAL, "..", "data", "processed", "oferta_nacional_limpia.csv"))
-ARCHIVO_DICCIONARIO = os.path.abspath(os.path.join(DIRECTORIO_ACTUAL, "..", "data", "processed", "diccionario_ubicaciones.csv"))
-ARCHIVO_FINAL = os.path.abspath(os.path.join(DIRECTORIO_ACTUAL, "..", "data", "processed", "oferta_nacional_geo_final.csv"))
+DIR_BASE = os.path.dirname(os.path.abspath(__file__))
+PATH_RAW = os.path.abspath(os.path.join(DIR_BASE, "..", "data", "processed", "oferta_nacional_limpia.csv"))
+PATH_OLD_GEO = os.path.abspath(os.path.join(DIR_BASE, "..", "data", "processed", "oferta_nacional_geocodificada.csv"))
+PATH_DICT = os.path.abspath(os.path.join(DIR_BASE, "..", "data", "processed", "diccionario_ubicaciones.csv"))
+PATH_FINAL = os.path.abspath(os.path.join(DIR_BASE, "..", "data", "processed", "oferta_nacional_geo_final.csv"))
 
-def preparar_direccion(ubicacion, estado):
-    """Construye la dirección de búsqueda."""
-    if pd.isna(ubicacion) or str(ubicacion).strip() == "":
-        return None
-    # Limpiamos textos como "#s/n" o "#000" que confunden al geocoder
-    ubi_limpia = str(ubicacion).split('#')[0].strip()
-    return f"{ubi_limpia}, {str(estado).strip()}, México"
+# --- PARÁMETROS ---
+LOTE_GUARDADO = 20
+DELAY_API = 1.2
 
-def paso_1_crear_diccionario():
-    """Extrae solo las ubicaciones ÚNICAS de los 220k registros."""
-    print("🔍 Analizando el dataset para encontrar ubicaciones únicas...")
-    df_maestro = pd.read_csv(ARCHIVO_ENTRADA)
+def verificar_permisos_y_archivos():
+    """Verifica la existencia de archivos y si tenemos permiso de escritura."""
+    print(f"\n{'='*70}\n🛡️  VERIFICACIÓN DE SEGURIDAD Y PERMISOS\n{'='*70}")
     
-    # Crear columna de búsqueda
-    df_maestro['Query_Geo'] = df_maestro.apply(lambda row: preparar_direccion(row['Ubicacion'], row['Estado']), axis=1)
+    # 1. Verificar archivo base
+    if not os.path.exists(PATH_RAW):
+        print(f"❌ ERROR CRÍTICO: No se encuentra el archivo maestro: {PATH_RAW}")
+        sys.exit(1)
     
-    # Extraer valores únicos
-    ubicaciones_unicas = df_maestro['Query_Geo'].dropna().unique()
-    print(f"📊 De {len(df_maestro):,} registros, solo hay {len(ubicaciones_unicas):,} ubicaciones únicas.")
-    
-    # Crear o cargar diccionario
-    if os.path.exists(ARCHIVO_DICCIONARIO):
-        df_diccionario = pd.read_csv(ARCHIVO_DICCIONARIO)
-        print(f"🔄 Diccionario existente cargado con {len(df_diccionario):,} registros.")
-    else:
-        df_diccionario = pd.DataFrame({'Query_Geo': ubicaciones_unicas, 'Latitud': None, 'Longitud': None})
-        df_diccionario.to_csv(ARCHIVO_DICCIONARIO, index=False)
-        print("💾 Nuevo diccionario de ubicaciones creado.")
-        
-    return df_maestro, df_diccionario
+    # 2. Verificar permisos de escritura en la carpeta
+    directorio = os.path.dirname(PATH_DICT)
+    if not os.access(directorio, os.W_OK):
+        print(f"❌ ERROR DE PERMISOS: No tengo permiso para escribir en la carpeta: {directorio}")
+        sys.exit(1)
 
-def paso_2_geocodificar_diccionario(df_diccionario):
-    """Geocodifica SOLO las direcciones únicas faltantes."""
-    # Filtrar las que aún no tienen coordenadas
-    df_pendientes = df_diccionario[df_diccionario['Latitud'].isna()].copy()
-    total_pendientes = len(df_pendientes)
-    
-    if total_pendientes == 0:
-        print("✅ El diccionario está 100% geocodificado.")
-        return df_diccionario
-        
-    print(f"🚀 Iniciando geocodificación de {total_pendientes:,} ubicaciones únicas...")
-    
-    # Configurar Geocodificador
-    geolocator = Nominatim(user_agent="Tesis_Recomendador_Vivienda_Mx_V2")
-    geocode_con_pausa = RateLimiter(geolocator.geocode, min_delay_seconds=1.1, error_wait_seconds=5.0)
-    
-    # Habilitar barra de progreso para Pandas
-    tqdm.pandas(desc="Geocodificando")
-    
-    # Función auxiliar para manejar la respuesta
-    def obtener_coordenadas(query):
+    # 3. Verificar si el archivo está bloqueado por otro programa (Excel)
+    if os.path.exists(PATH_DICT):
         try:
-            loc = geocode_con_pausa(query)
-            if loc:
-                return pd.Series([loc.latitude, loc.longitude])
-        except:
-            time.sleep(2) # Pausa extra por error de red
-        return pd.Series([None, None])
+            with open(PATH_DICT, 'a'): pass
+            print("✅ Permisos de escritura confirmados.")
+        except IOError:
+            print("❌ ERROR: El archivo 'diccionario_ubicaciones.csv' está bloqueado (¿Está abierto en Excel?)")
+            sys.exit(1)
 
-    # Aplicar la geocodificación con barra de progreso
-    # NOTA: Para no perder progreso si falla, guardaremos cada 100 iteraciones
-    lote_size = 100
-    for i in range(0, total_pendientes, lote_size):
-        lote = df_pendientes.iloc[i:i+lote_size]
-        
-        # Geocodificar el lote
-        lote[['Latitud_nueva', 'Longitud_nueva']] = lote['Query_Geo'].progress_apply(obtener_coordenadas)
-        
-        # Actualizar el diccionario principal en memoria
-        for idx, row in lote.iterrows():
-            if pd.notna(row['Latitud_nueva']):
-                df_diccionario.at[idx, 'Latitud'] = row['Latitud_nueva']
-                df_diccionario.at[idx, 'Longitud'] = row['Longitud_nueva']
+def auditoria_inicial():
+    verificar_permisos_y_archivos()
+    
+    df_m = pd.read_csv(PATH_RAW)
+    # Limpieza rápida de ruidos en direcciones
+    df_m['Query_Geo'] = df_m.apply(lambda r: f"{str(r['Ubicacion']).split('#')[0].strip()}, {str(r['Estado']).strip()}, México", axis=1)
+    uni_maestro = set(df_m['Query_Geo'].dropna().unique())
+    
+    base_datos = {}
+    
+    # Intentar recuperar datos de archivos previos
+    for path in [PATH_OLD_GEO, PATH_DICT]:
+        if os.path.exists(path):
+            print(f"🔍 Recuperando datos de: {os.path.basename(path)}")
+            try:
+                df_recup = pd.read_csv(path)
+                # Si es el archivo viejo, hay que generar la llave Query_Geo
+                if 'Query_Geo' not in df_recup.columns:
+                    df_recup['Query_Geo'] = df_recup.apply(lambda r: f"{str(r['Ubicacion']).split('#')[0].strip()}, {str(r['Estado']).strip()}, México", axis=1)
                 
-        # Guardar checkpoint en disco
-        df_diccionario.to_csv(ARCHIVO_DICCIONARIO, index=False)
-        print(f"💾 Checkpoint guardado: Lote {i//lote_size + 1} completado.")
+                # Extraer solo lo que tiene coordenadas válidas
+                for _, r in df_recup.dropna(subset=['Latitud', 'Longitud']).iterrows():
+                    base_datos[r['Query_Geo']] = (r['Latitud'], r['Longitud'])
+            except: continue
 
-    return df_diccionario
+    final_dict_data = [{'Query_Geo': q, 'Latitud': base_datos.get(q, (None, None))[0], 
+                        'Longitud': base_datos.get(q, (None, None))[1]} for q in uni_maestro]
+    
+    df_trabajo = pd.DataFrame(final_dict_data)
+    df_trabajo.to_csv(PATH_DICT, index=False)
+    print(f"✅ Auditoría lista. Registros recuperados: {df_trabajo['Latitud'].notna().sum():,}")
+    return df_m, df_trabajo
 
-def paso_3_ensamblar_dataset_final(df_maestro, df_diccionario):
-    """Une las coordenadas del diccionario a los 220k registros originales."""
-    print("🧩 Ensamblando el dataset final (Join Espacial Vectorizado)...")
+def motor_geocodificacion(df_dict):
+    print(f"\n{'='*70}\n🚀 PROCESANDO CON VERIFICACIÓN DE ESCRITURA ACTIVA\n{'='*70}")
     
-    # Hacer un Left Join: A cada registro maestro le pegamos su Lat/Lon según su Query_Geo
-    df_final = pd.merge(
-        df_maestro,
-        df_diccionario[['Query_Geo', 'Latitud', 'Longitud']],
-        on='Query_Geo',
-        how='left'
-    )
-    
-    # Limpiar columna auxiliar
-    df_final.drop(columns=['Query_Geo'], inplace=True)
-    
-    # Guardar resultado
-    df_final.to_csv(ARCHIVO_FINAL, index=False, encoding='utf-8-sig')
-    
-    exito = df_final['Latitud'].notna().sum()
-    print(f"🎉 Proceso Terminado!")
-    print(f"📊 Total de registros: {len(df_final):,}")
-    print(f"📍 Coordenadas asignadas: {exito:,} ({(exito/len(df_final))*100:.1f}%)")
-    print(f"💾 Archivo final listo en: {ARCHIVO_FINAL}")
+    pendientes = df_dict[df_dict['Latitud'].isna()].index.tolist()
+    if not pendientes: return df_dict
+
+    geolocator = Nominatim(user_agent="Cesar_Tesis_Master_Final")
+    service = RateLimiter(geolocator.geocode, min_delay_seconds=DELAY_API, error_wait_seconds=10.0)
+
+    pbar = tqdm(total=len(pendientes), desc="📍 Geocodificando")
+    cambios_sin_guardar = 0
+    ultima_fecha_mod = os.path.getmtime(PATH_DICT)
+
+    try:
+        for idx in pendientes:
+            query = df_dict.at[idx, 'Query_Geo']
+            try:
+                res = service(query)
+                if res:
+                    df_dict.at[idx, 'Latitud'] = res.latitude
+                    df_dict.at[idx, 'Longitud'] = res.longitude
+                    cambios_sin_guardar += 1
+            except Exception as e:
+                if "429" in str(e): time.sleep(30)
+                else: df_dict.at[idx, 'Latitud'], df_dict.at[idx, 'Longitud'] = 0.0, 0.0
+            
+            pbar.update(1)
+            
+            # --- GUARDADO Y VERIFICACIÓN ---
+            if cambios_sin_guardar >= LOTE_GUARDADO:
+                try:
+                    df_dict.to_csv(PATH_DICT, index=False)
+                    # VERIFICAR SI EL ARCHIVO REALMENTE SE ESCRIBIÓ
+                    nueva_fecha = os.path.getmtime(PATH_DICT)
+                    if nueva_fecha > ultima_fecha_mod:
+                        pbar.set_postfix({"Disco": "✅ Escrito"})
+                        ultima_fecha_mod = nueva_fecha
+                        cambios_sin_guardar = 0
+                    else:
+                        print("\n⚠️ ALERTA: El archivo no se actualizó en disco. Revisando permisos...")
+                except Exception as e:
+                    print(f"\n❌ ERROR DE ESCRITURA: {e}. ¿Cerraste Excel?")
+                    sys.exit(1)
+
+    except KeyboardInterrupt: print("\n👋 Pausa segura.")
+    finally:
+        df_dict.to_csv(PATH_DICT, index=False)
+        pbar.close()
+    return df_dict
+
+def ensamblaje_final(df_m, df_d):
+    print(f"\n{'='*70}\n🧩 ENSAMBLAJE FINAL\n{'='*70}")
+    mapa_lat = dict(zip(df_d['Query_Geo'], df_d['Latitud']))
+    mapa_lon = dict(zip(df_d['Query_Geo'], df_d['Longitud']))
+    df_m['Latitud'] = df_m['Query_Geo'].map(mapa_lat)
+    df_m['Longitud'] = df_m['Query_Geo'].map(mapa_lon)
+    df_m.drop(columns=['Query_Geo']).to_csv(PATH_FINAL, index=False, encoding='utf-8-sig')
+    print(f"🎉 ¡Dataset Master listo! Ubicación: {PATH_FINAL}")
 
 if __name__ == "__main__":
-    df_m, df_dict = paso_1_crear_diccionario()
-    df_dict_actualizado = paso_2_geocodificar_diccionario(df_dict)
-    paso_3_ensamblar_dataset_final(df_m, df_dict_actualizado)
+    maestro, diccionario = auditoria_inicial()
+    diccionario_final = motor_geocodificacion(diccionario)
+    ensamblaje_final(maestro, diccionario_final)
