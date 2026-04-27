@@ -1,90 +1,131 @@
 import pandas as pd
+import numpy as np
 import re
 import os
-import sys
 
 # --- RUTAS DE ARCHIVOS ---
 DIR_BASE = os.path.dirname(os.path.abspath(__file__))
 PATH_MAESTRO = os.path.abspath(os.path.join(DIR_BASE, "..", "data", "processed", "oferta_nacional_limpia.csv"))
 PATH_GEONAMES = os.path.abspath(os.path.join(DIR_BASE, "..", "data", "external", "MX.txt"))
 PATH_FINAL = os.path.abspath(os.path.join(DIR_BASE, "..", "data", "processed", "oferta_nacional_geo_final.csv"))
+PATH_ERRORES = os.path.abspath(os.path.join(DIR_BASE, "..", "data", "processed", "geocodificacion_errores.csv"))
 
-def extraer_cp(u):
-    if pd.isna(u): return None
-    match = re.search(r'\b(\d{5})\b', str(u))
-    return match.group(1) if match else None
-
-def normalizar_texto(texto):
-    """Limpia tildes y caracteres para comparar estados correctamente."""
+def normalizar_texto_mejorado(texto):
     if pd.isna(texto): return ""
     a,b = 'áéíóúüñ','aeiouun'
     trans = str.maketrans(a,b)
-    return str(texto).lower().translate(trans).strip()
+    t = str(texto).lower().translate(trans).replace("-", " ").strip()
+    if t == "distrito federal": t = "ciudad de mexico"
+    return t
 
-def ejecucion_turbo_validada():
-    print(f"\n{'='*70}\n🚀 GEO-VALIDADOR TURBO (OFFLINE)\n{'='*70}")
+def extraer_cp_mejorado(u):
+    if pd.isna(u): return None
+    t = str(u).lower()
+    patron = re.search(r'(?:c\.?p\.?|codigo postal)\s*:?\s*(\d{5})', t)
+    if patron: return patron.group(1)
     
-    # 1. Cargar el Diccionario de Coordenadas (MX.txt)
-    print("📖 Cargando MX.txt de GeoNames...")
-    # Columnas: 1:CP, 3:Estado, 5:Municipio, 9:Latitud, 10:Longitud
-    df_geo = pd.read_csv(PATH_GEONAMES, sep='\t', header=None, dtype={1: str})
-    df_geo = df_geo[[1, 3, 5, 9, 10]]
+    todos = re.findall(r'\b(\d{5})\b', t)
+    if todos: return todos[-1]
+    return None
+
+def ejecucion_maxima_precision():
+    print(f"\n{'='*70}\n🚀 GEO-VALIDADOR MAX (DOBLE MOTOR: CP + MUNICIPIO)\n{'='*70}")
+    
+    # 1. Cargar GeoNames
+    columnas_geonames = ['c1', 'postal_code', 'c3', 'admin_name1', 'c5', 'admin_name2', 'c7', 'c8', 'c9', 'latitude', 'longitude', 'c12']
+    df_geo = pd.read_csv(PATH_GEONAMES, sep='\t', names=columnas_geonames, dtype={'postal_code': str})
+    
+    df_geo = df_geo[['postal_code', 'admin_name1', 'admin_name2', 'latitude', 'longitude']]
     df_geo.columns = ['cp_ref', 'Estado_Geo', 'Municipio_Geo', 'Latitud', 'Longitud']
     
-    # Nos quedamos con un solo CP para evitar duplicados en el merge
-    df_geo = df_geo.drop_duplicates(subset=['cp_ref'])
+    df_geo['Edo_Norm'] = df_geo['Estado_Geo'].apply(normalizar_texto_mejorado)
+    df_geo['Mun_Norm'] = df_geo['Municipio_Geo'].apply(normalizar_texto_mejorado)
 
-    # 2. Cargar tu Dataset de la Tesis
-    print("📖 Cargando dataset maestro...")
+    # DICCIONARIO 1: Por CP
+    dict_cp = df_geo.drop_duplicates(subset=['cp_ref']).drop(columns=['Edo_Norm', 'Mun_Norm'])
+    
+    # DICCIONARIO 2: Por Municipio
+    dict_mun = df_geo.groupby(['Edo_Norm', 'Mun_Norm']).agg({
+        'Latitud': 'mean', 
+        'Longitud': 'mean', 
+        'Municipio_Geo': 'first'
+    }).reset_index()
+
+    # 2. Cargar Dataset Maestro
     df_tesis = pd.read_csv(PATH_MAESTRO)
+    df_tesis['cp_extraido'] = df_tesis['Ubicacion'].apply(extraer_cp_mejorado)
+    df_tesis['Edo_Norm'] = df_tesis['Estado'].apply(normalizar_texto_mejorado)
     
-    # 3. Extraer CP de los anuncios
-    print("🧹 Extrayendo códigos postales...")
-    df_tesis['cp_extraido'] = df_tesis['Ubicacion'].apply(extraer_cp)
+    # 3. Fase 1: Cruce por Código Postal
+    print("🧩 Fase 1: Geolocalizando por Código Postal...")
+    df_merged = pd.merge(df_tesis, dict_cp, left_on='cp_extraido', right_on='cp_ref', how='left')
     
-    # 4. CRUCE MASIVO (Merge)
-    print("🧩 Realizando cruce de datos...")
-    df_merged = pd.merge(
-        df_tesis, 
-        df_geo, 
-        left_on='cp_extraido', 
-        right_on='cp_ref', 
-        how='left'
-    )
-    
-    # 5. VALIDACIÓN DE SEGURIDAD (Estado vs Estado)
-    print("🛡️  Validando coincidencia de Estados...")
-    
-    # Creamos una máscara de validación
-    # Comparamos el estado que tú tienes con el que Geonames dice que pertenece ese CP
-    df_merged['Edo_Match'] = df_merged.apply(
-        lambda r: normalizar_texto(r['Estado']) in normalizar_texto(r['Estado_Geo']) 
-        if pd.notna(r['Estado_Geo']) else False, axis=1
-    )
+    # 4. Validar Fase 1
+    def es_valido_cp(row):
+        if pd.isna(row['Latitud']): return False
+        edo_geo = normalizar_texto_mejorado(row['Estado_Geo'])
+        return row['Edo_Norm'] in edo_geo or edo_geo in row['Edo_Norm']
 
-    # 6. Separar Datos Válidos de Errores
-    df_final = df_merged[df_merged['Edo_Match'] == True].copy()
-    errores = df_merged[df_merged['Edo_Match'] == False].copy()
+    df_merged['Valido_CP'] = df_merged.apply(es_valido_cp, axis=1)
 
-    # 7. Reporte de Calidad para la Tesis
-    total = len(df_tesis)
-    validos = len(df_final)
-    fallas_cp = df_merged['Latitud'].isna().sum()
-    fallas_edo = len(errores) - fallas_cp
+    # 5. Fase 2: Rescate por Municipio para los que fallaron
+    print("🚑 Fase 2: Activando Rescate por Municipio (Fallback)...")
+    
+    def rescatar_por_municipio(row):
+        if row['Valido_CP']: return row
+        
+        ubicacion_limpia = normalizar_texto_mejorado(row['Ubicacion'])
+        muns_del_estado = dict_mun[dict_mun['Edo_Norm'] == row['Edo_Norm']]
+        
+        nombres_mun = muns_del_estado['Mun_Norm'].tolist()
+        nombres_mun.sort(key=len, reverse=True)
+        
+        for mun_nombre in nombres_mun:
+            patron = r'\b' + re.escape(mun_nombre) + r'\b'
+            if re.search(patron, ubicacion_limpia):
+                datos_rescatados = muns_del_estado[muns_del_estado['Mun_Norm'] == mun_nombre].iloc[0]
+                row['Latitud'] = datos_rescatados['Latitud']
+                row['Longitud'] = datos_rescatados['Longitud']
+                row['Municipio_Geo'] = datos_rescatados['Municipio_Geo']
+                row['Rescatado'] = True
+                return row
+        return row
+
+    df_merged['Rescatado'] = False
+    df_final = df_merged.apply(rescatar_por_municipio, axis=1)
+
+    # 6. Estadísticas Finales
+    exito_cp = df_final['Valido_CP'].sum()
+    exito_mun = df_final['Rescatado'].sum()
+    totales_validos = exito_cp + exito_mun
+    errores_absolutos = len(df_tesis) - totales_validos
     
     print(f"\n{'='*40}")
-    print(f"📊 RESULTADOS DE CALIDAD GEOGRÁFICA")
-    print(f"✅ Registros Válidos: {validos:,} ({validos/total:.1%})")
-    print(f"❌ CP no encontrado: {fallas_cp:,}")
-    print(f"⚠️ Estado no coincide: {fallas_edo:,} (CPs de otros estados)")
+    print(f"📊 RESULTADOS DE GEOCODIFICACIÓN")
+    print(f"✅ Válidos por Código Postal: {exito_cp:,}")
+    print(f"🚑 Rescatados por Municipio : {exito_mun:,}")
+    print(f"🏆 Dataset Final            : {totales_validos:,} ({totales_validos/len(df_tesis):.2%})")
+    print(f"❌ Errores irrecuperables   : {errores_absolutos:,}")
     print(f"{'='*40}")
 
-    # 8. Limpieza final y guardado
-    # Mantenemos las columnas de Municipio_Geo para tu modelo
-    columnas_a_quitar = ['cp_extraido', 'cp_ref', 'Edo_Match', 'Estado_Geo']
-    df_final.drop(columns=columnas_a_quitar).to_csv(PATH_FINAL, index=False, encoding='utf-8-sig')
+    # 7. SEPARAR, LIMPIAR Y GUARDAR
+    columnas_limpiar = ['cp_extraido', 'cp_ref', 'Estado_Geo', 'Edo_Norm', 'Mun_Norm', 'Valido_CP', 'Rescatado']
+    columnas_existentes = [c for c in columnas_limpiar if c in df_final.columns]
     
-    print(f"💾 Dataset Blindado guardado en: {PATH_FINAL}")
+    # 7a. Guardar el Dataset Limpio para Machine Learning
+    df_dataset_limpio = df_final[df_final['Latitud'].notna()].copy()
+    df_dataset_limpio.drop(columns=columnas_existentes).to_csv(PATH_FINAL, index=False, encoding='utf-8-sig')
+    
+    # 7b. Guardar el Reporte de Errores
+    df_errores = df_final[df_final['Latitud'].isna()].copy()
+    if not df_errores.empty:
+        df_errores['Diagnostico'] = "FALLO_TOTAL: CP inválido y Municipio no mencionado en la ubicación"
+        columnas_revision = ['Diagnostico', 'cp_extraido', 'Estado', 'Ubicacion', 'Precio_MXN']
+        columnas_disponibles = [c for c in columnas_revision if c in df_errores.columns]
+        df_errores[columnas_disponibles].to_csv(PATH_ERRORES, index=False, encoding='utf-8-sig')
+
+    print(f"💾 Dataset Final guardado en: {PATH_FINAL}")
+    print(f"💾 Reporte de Errores guardado en: {PATH_ERRORES}")
 
 if __name__ == "__main__":
-    ejecucion_turbo_validada()
+    ejecucion_maxima_precision()
